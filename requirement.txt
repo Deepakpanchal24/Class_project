@@ -1,0 +1,15 @@
+pandas
+numpy
+streamlit
+faiss-cpu
+sentence-transformers
+langchain
+fastembed
+openai
+groq
+langchain-community
+pypdf
+tqdm
+python-dotenv
+redis
+PyMuPDF
