@@ -1,160 +1,236 @@
+from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+#from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings, HuggingFaceEndpoint
+#from langchain_community.llms import HuggingFaceEndpoint
+from langchain_core.prompts import PromptTemplate
+from langchain.chains import RetrievalQA
 
-# Import Required Libraries
+# Step 1: Load raw PDF(s)
+DATA_PATH=r"D:\med\myvenv\Data"
+def load_pdf_files(data):
+    loader = DirectoryLoader(data,
+                             glob='*.pdf',
+                             loader_cls=PyPDFLoader)
+    
+    documents=loader.load()
+    return documents
+
+documents=load_pdf_files(data=DATA_PATH)
+#print("Length of PDF pages: ", len(documents))
+
+
+# Step 2: Create Chunks
+def create_chunks(extracted_data):
+    text_splitter=RecursiveCharacterTextSplitter(chunk_size=500,
+                                                 chunk_overlap=50)
+    text_chunks=text_splitter.split_documents(extracted_data)
+    return text_chunks
+
+text_chunks=create_chunks(extracted_data=documents)
+#print("Length of Text Chunks: ", len(text_chunks))
+
+# Step 3: Create Vector Embeddings 
+
+def get_embedding_model():
+    embedding_model=HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    return embedding_model
+
+embedding_model=get_embedding_model()
+
+# Step 4: Store embeddings in FAISS
+DB_FAISS_PATH="vectorstore/db_faiss"
+db=FAISS.from_documents(text_chunks, embedding_model)
+db.save_local(DB_FAISS_PATH)
+
+import os
+
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv())
+
+
+# Step 1: Setup LLM (Mistral with HuggingFace)
+HF_TOKEN=os.environ.get("HF_TOKEN")
+HUGGINGFACE_REPO_ID="mistralai/Mistral-7B-Instruct-v0.3"
+
+def load_llm(huggingface_repo_id):
+    llm = HuggingFaceEndpoint(
+        repo_id=huggingface_repo_id,
+        huggingfacehub_api_token=HF_TOKEN,
+        temperature=0.5,
+        max_new_tokens=512,
+        top_k=50,
+        top_p=0.9,
+        repetition_penalty=1.1
+    )
+    return llm
+
+# Step 2: Connect LLM with FAISS and Create chain
+
+CUSTOM_PROMPT_TEMPLATE = """
+You are **MediAid**, a medical AI assistant designed to analyze clinical data and provide a structured summary of diagnosis, treatment, and patient care recommendations.
+
+Your role is to assist clinicians and healthcare staff by interpreting patient-specific data to generate clear, actionable clinical insights.
+
+**TASK**:
+Given structured or unstructured medical input (e.g., symptoms, test results, history), provide:
+
+1. **Type of Disease / Condition**  
+   - Clearly identify the most likely disease(s) or medical condition(s).
+
+2. **Medications**  
+   - List evidence-based treatments with dosages, routes, and duration.
+   - Include both first-line and alternative options when relevant.
+
+3. **Precautions / Warnings**  
+   - Highlight key safety concerns (e.g., contraindications, allergies, drug interactions).
+   - Include patient-specific risks (e.g., renal function, pregnancy, age).
+
+4. **Clinical Summary**  
+   - Provide a concise overview for EHR inclusion (diagnosis, plan, key findings).
+
+5. **Lifestyle & Supportive Care**  
+   - Recommend non-pharmacologic measures (e.g., diet, hydration, rest, physiotherapy).
+   - Include patient education points.
+
+6. **Monitoring & Follow-up**  
+   - Suggest clinical markers, labs, or symptoms to monitor.
+   - Recommend follow-up timing and any reassessment steps.
+
+7. **Referral / Escalation Criteria**  
+   - Indicate when to involve specialists or escalate care based on red flags or treatment failure.
+
+**INSTRUCTIONAL RULES**:
+- Use only the data provided; do not invent or assume unknowns.
+- Base all recommendations on up-to-date, evidence-based guidelines.
+- Adjust medications and diagnostics based on age, gender, weight, and comorbidities.
+
+**RESPONSE FORMAT**:
+
+**Type of Disease / Condition**:  
+[Primary diagnosis with brief rationale]
+
+**Medications**:  
+- [Drug Name] — [Dosage] — [Route] — [Duration]  
+- [Alternative if applicable]
+
+**Precautions / Warnings**:  
+- [e.g., Avoid NSAIDs in renal impairment, Monitor liver enzymes, etc.]
+
+**Clinical Summary**:  
+- [Brief note for documentation: age, sex, diagnosis, main symptoms, plan]
+
+**Lifestyle & Supportive Care**:  
+- [Diet, rest, fluids, exercises, home care instructions, etc.]
+
+**Monitoring & Follow-up**:  
+- [What to monitor, how often, and when to reassess]
+
+**Referral / Escalation Criteria**:  
+- [Conditions or findings requiring specialist care or emergency intervention]
+
+**Context**:  
+{context}
+
+**Clinical Question**:  
+{question}
+"""
+
+def set_custom_prompt(custom_prompt_template):
+    prompt=PromptTemplate(template=custom_prompt_template, input_variables=["context", "question"])
+    return prompt
+
+# Load Database
+DB_FAISS_PATH="vectorstore/db_faiss"
+embedding_model=HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+db=FAISS.load_local(DB_FAISS_PATH, embedding_model, allow_dangerous_deserialization=True)
+
+# Create QA chain
+qa_chain=RetrievalQA.from_chain_type(
+    llm=load_llm(HUGGINGFACE_REPO_ID),
+    chain_type="stuff",
+    retriever=db.as_retriever(search_kwargs={'k':3}),
+    return_source_documents=True,
+    chain_type_kwargs={'prompt':set_custom_prompt(CUSTOM_PROMPT_TEMPLATE)}
+)
+
+# Now invoke with a single query
+user_query=input("Write Query Here: ")
+response=qa_chain.invoke({'query': user_query})
+print("RESULT: ", response["result"])
+print("SOURCE DOCUMENTS: ", response["source_documents"])
+
+
+
+## for streamlit
 
 import streamlit as st
-import pandas as pd
-import openai
-import os
-from dotenv import load_dotenv
-
-# Load API Key from .env File
 
 
-# Use .env file to securely store your OpenAI API key.
-# You should create a .env file with the line: OPENAI_API_KEY=your_key_here
-
-load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
-# Ensure the API key is set
-
-# Load Medical Dataset (CSV)
-
-@st.cache_data
-def load_dataset():
-    """
-    Load the synthetic medical data from the uploaded CSV file.
-    Caching is enabled for performance.
-    """
-    try:
-        df = pd.read_csv("C:\\Users\\LENOVO\\OneDrive\\Desktop\\PROJECT_HEALTHCARE\\synthetic_medical_data_genai.csv")
-
-        return df
-    except FileNotFoundError:
-        st.error("CSV file not found. Please make sure 'synthetic_medical_data_genai.csv' is in the same directory.")
-        return pd.DataFrame()
+DB_FAISS_PATH="vectorstore/db_faiss"
+@st.cache_resource
+def get_vectorstore():
+    embedding_model=HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2')
+    db=FAISS.load_local(DB_FAISS_PATH, embedding_model, allow_dangerous_deserialization=True)
+    return db
 
 
-# Construct the Prompt
-
-def create_prompt(name, gender, age, symptoms, history, tests, question):
-    """
-    Build a prompt in a structured format that includes:
-    - Name
-    - Gender
-    - Age
-    - Symptoms
-    - Medical history
-    - Test results
-    - A physician's query
-    """
-    prompt = f"""
-You are MediMind, a helpful and knowledgeable AI assistant for clinical diagnosis and treatment planning.
-
-You will be given structured clinical data about a patient case, and you must:
-1. Analyze the symptoms and test results.
-2. Provide a list of possible differential diagnoses with probabilities.
-3. Give appropriate clinical decision support including:
-   - Immediate actions required
-   - Recommended treatment plan
-   - Suggested follow-up investigations or monitoring
-
-PATIENT CASE DETAILS:
-- Name: {name}
-- Gender: {gender}
-- Age: {age}
-- Symptoms: {symptoms}
-- Medical History: {history}
-- Test Results: {tests}
-
-PHYSICIAN QUERY:
-"{question}"
-
-Please respond in this format:
-
---- DIAGNOSIS ---
-[List differential diagnoses and their likelihoods]
-
---- CLINICAL DECISION SUPPORT ---
-- Immediate Actions:
-- Treatment Plan:
-- Follow-Up Recommendations:
-"""
+def set_custom_prompt(custom_prompt_template):
+    prompt=PromptTemplate(template=custom_prompt_template, input_variables=["context", "question"])
     return prompt
 
 
-#  Get OpenAI Response
+def load_llm(huggingface_repo_id, HF_TOKEN):
+    llm = HuggingFaceEndpoint(
+        repo_id=huggingface_repo_id,
+        temperature=0.5,
+        huggingfacehub_api_token=HF_TOKEN,
+        max_new_tokens=512
+    )
+    return llm
 
 
-def get_medimind_response(prompt):
-    """
-    Uses OpenAI's ChatCompletion API to generate a clinical response
-    based on the prompt generated from user input.
-    """
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",  # or "gpt-3.5-turbo"
-            messages=[
-                {"role": "system", "content": "You are a helpful and accurate AI assistant for doctors."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-            max_tokens=1000,
-            n=1,
-            stop=None
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"❌ Error: {str(e)}"
+def main():
+    st.title("Medical Chatbot!")
 
-#streamlit App UI
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []
 
-# Set up the web app page
-st.set_page_config(page_title="MediMind - AI for Clinical Support", layout="wide")
+    for message in st.session_state.messages:
+        st.chat_message(message['role']).markdown(message['content'])
 
-# Title
-st.title("MediMind: AI-Powered Clinical Decision Support System")
+    prompt=st.chat_input("Pass your prompt here")
 
-# Subtitle
-st.markdown("This application uses **OpenAI's GPT model** to assist healthcare professionals in analyzing symptoms, providing differential diagnoses, and suggesting treatment plans.")
+    if prompt:
+        st.chat_message('user').markdown(prompt)
+        st.session_state.messages.append({'role':'user', 'content': prompt})
 
 
-# 🧾 Input Fields
-st.header("🔍 Enter Patient Case Information")
+        try: 
+            vectorstore=get_vectorstore()
+            if vectorstore is None:
+                st.error("Failed to load the vector store")
 
-# Text areas for structured clinical input
-name =st.text_input("Enter your name")
-gender = st.selectbox("Select gender", ["Select", "Male", "Female", "Other"])
-age = st.number_input("Enter you age", min_value=0, max_value=120, step=1)
+            qa_chain=RetrievalQA.from_chain_type(
+                llm=load_llm(huggingface_repo_id=HUGGINGFACE_REPO_ID, HF_TOKEN=HF_TOKEN),
+                chain_type="stuff",
+                retriever=vectorstore.as_retriever(search_kwargs={'k':3}),
+                return_source_documents=True,
+                chain_type_kwargs={'prompt':set_custom_prompt(CUSTOM_PROMPT_TEMPLATE)}
+            )
 
-symptoms = st.text_area("Symptoms", placeholder="E.g., chest pain for 2 hours, shortness of breath", height=100)
-history = st.text_area("Medical History", placeholder="E.g., diabetes, hypertension, smoker", height=100)
-tests = st.text_area("Test Results", placeholder="E.g., ECG shows ST-elevation, troponin I = 2.5 ng/mL", height=100)
-query = st.text_input("Physician Query", placeholder="E.g., What’s the likely diagnosis and treatment plan?")
+            response=qa_chain.invoke({'query':prompt})
 
-# Submit button
-if st.button("Run Clinical Analysis with MediMind"):
-    
-    if not all([name, gender != "Select", age, symptoms, history, tests, query]):
-        st.warning("Please fill out all fields before submitting.")
-    else:
-        with st.spinner(" MediMind is analyzing the case..."):
-            # Generate prompt
-            final_prompt = create_prompt(name, gender, age, symptoms, history, tests, query)
+            result=response["result"]
+            source_documents=response["source_documents"]
+            result_to_show=result+"\nSource Docs:\n"+str(source_documents)
+            #response="Hi, I am MediBot!"
+            st.chat_message('assistant').markdown(result_to_show)
+            st.session_state.messages.append({'role':'assistant', 'content': result_to_show})
 
-            # Get OpenAI response
-            output = get_medimind_response(final_prompt)
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
 
-        # Display output
-        st.subheader("MediMind’s Response")
-        st.markdown(output)
-
-
-#  Display Sample Dataset
-st.markdown("---")
-st.subheader("Sample Reference Cases from Dataset")
-df = load_dataset()
-if not df.empty:
-    st.dataframe(df.head(10), use_container_width=True)
-else:
-    st.info("No reference data loaded.")
+if __name__ == "__main__":
+    main()
